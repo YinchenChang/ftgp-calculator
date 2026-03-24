@@ -669,7 +669,7 @@ def compute_revenue(tl, dc, rack_name):
     r_n_racks = dc["n_racks"]
 
     eff_annual_sec = 8760 * 3600 * gpu_utilization * uptime
-    requests_per_rack_yr = math.floor(eff_annual_sec / tl["e2e_through_decode"]) * batch_size if tl["e2e_through_decode"] > 0 else 0
+    requests_per_rack_yr = math.floor(eff_annual_sec / tl["e2e"]) * batch_size if tl["e2e"] > 0 else 0
     total_requests_yr = requests_per_rack_yr * r_n_racks
 
     annual_input_tokens = total_requests_yr * input_tokens
@@ -739,7 +739,7 @@ with st.expander("📋 Config Summary", expanded=False):
 st.header("Key Metrics")
 m1, m2, m3, m4 = st.columns(4)
 with m1:
-    st.metric("VR E2E Latency (s)", f"{vr_tl['e2e_through_decode']:.6f}")
+    st.metric("VR E2E Latency (s)", f"{vr_tl['e2e']:.6f}")
 with m2:
     st.metric("VR Output tok/s", f"{vr_tl['tok_per_sec']:,.1f}")
 with m3:
@@ -749,7 +749,7 @@ with m4:
 
 m5, m6, m7, m8 = st.columns(4)
 with m5:
-    st.metric("GB200 E2E Latency (s)", f"{gb_tl['e2e_through_decode']:.6f}")
+    st.metric("GB200 E2E Latency (s)", f"{gb_tl['e2e']:.6f}")
 with m6:
     st.metric("GB200 Output tok/s", f"{gb_tl['tok_per_sec']:,.1f}")
 with m7:
@@ -902,7 +902,7 @@ for s in flowchart_steps:
     s["per_tok_fmt"] = _fmt_time(s["per_tok_time"])
     s["all_tok_fmt"] = _fmt_time(s["all_tok_time"])
 
-e2e_total = sel_tl["e2e_through_decode"]
+e2e_total = sel_tl["e2e"]
 
 flowchart_html = f"""
 <style>
@@ -1033,7 +1033,7 @@ flowchart_html = f"""
   </div>
 
   <div class="e2e-summary">
-    E2E Latency (through Decode-All): <strong>{_fmt_time(e2e_total)}</strong>
+    E2E Latency: <strong>{_fmt_time(e2e_total)}</strong>
     &nbsp;&nbsp;|&nbsp;&nbsp; Output tok/s: <strong>{sel_tl['tok_per_sec']:,.1f}</strong>
   </div>
 </div>
@@ -1318,9 +1318,9 @@ for i, name in enumerate(vr_tl["step_names"]):
         tl_data.append({"Step": "   ↳ NVLink",
                          "VR Duration (s)": vr_tl["n5_nvlink"],
                          "GB200 Duration (s)": gb_tl["n5_nvlink"]})
-tl_data.append({"Step": "E2E (through Decode-All)",
-                 "VR Duration (s)": vr_tl["e2e_through_decode"],
-                 "GB200 Duration (s)": gb_tl["e2e_through_decode"]})
+tl_data.append({"Step": "E2E",
+                 "VR Duration (s)": vr_tl["e2e"],
+                 "GB200 Duration (s)": gb_tl["e2e"]})
 tl_data.append({"Step": "Avg Time/Output Token (s)",
                  "VR Duration (s)": vr_tl["avg_time_per_tok"],
                  "GB200 Duration (s)": gb_tl["avg_time_per_tok"]})
@@ -1339,7 +1339,7 @@ def show_revenue(col, title, rev, dc, tl_data_dict):
     with col:
         st.subheader(title)
         st.markdown("**Section 1: Inference Configuration**")
-        st.write(f"E2E Latency: {tl_data_dict['e2e_through_decode']:.6f}s")
+        st.write(f"E2E Latency: {tl_data_dict['e2e']:.6f}s")
         st.write(f"Racks: {dc['n_racks']:,} | GPUs: {dc['total_gpus']:,}")
         st.write(f"Utilization: {gpu_utilization:.0%} | Uptime: {uptime:.1%}")
         st.write(f"Eff. Annual Seconds: {rev['eff_annual_sec']:,.0f}")
@@ -1412,7 +1412,7 @@ cal = {
     "Metric": ["E2E Latency (s)", "Output tok/s", "Annual Revenue ($M)"],
     "Target": [1.928302, 32351.0, 76735.4],
     "Computed (VR)": [
-        round(vr_tl["e2e_through_decode"], 6),
+        round(vr_tl["e2e"], 6),
         round(vr_tl["tok_per_sec"], 1),
         round(vr_rev["total_revenue"], 1),
     ],
