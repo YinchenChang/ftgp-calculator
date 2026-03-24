@@ -1353,7 +1353,7 @@ def show_revenue(col, title, rev, dc, tl_data_dict):
         st.write(f"Requests/sec: {rev['requests_per_sec']:,.0f}")
 
         st.markdown("**Section 3: Revenue**")
-        st.write(f"Input Price: ${input_price}/M | Output Price: ${output_price}/M")
+        st.write(f"Input Price: \${input_price}/M | Output Price: \${output_price}/M")
         st.write(f"Blended Rate: ${rev['blended_rate']:.2f}/M tokens")
         st.write(f"Input Revenue: **${rev['input_revenue']:,.1f}M**")
         st.write(f"Output Revenue: **${rev['output_revenue']:,.1f}M**")
