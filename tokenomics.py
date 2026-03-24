@@ -60,9 +60,9 @@ with st.sidebar:
     rack_type = st.selectbox("Rack Type", list(RACK_PRESETS.keys()))
     rp = RACK_PRESETS[rack_type]
 
-    st.subheader("▶ KEY INPUTS — Model & Tokens")
-    input_tokens = st.number_input("Input Tokens", value=4000, step=100)
-    output_tokens = st.number_input("Output Tokens", value=1000, step=100)
+    with st.expander("▶ KEY INPUTS — Model & Tokens", expanded=True):
+        input_tokens = st.number_input("Input Tokens", value=4000, step=100)
+        output_tokens = st.number_input("Output Tokens", value=1000, step=100)
 
     st.subheader("Model Spec")
     param_presets = {"1.5T": 1.5e12, "1T": 1e12, "500B": 500e9, "200B": 200e9, "70B": 70e9}
