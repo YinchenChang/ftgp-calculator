@@ -92,18 +92,27 @@ with st.sidebar:
         output_tokens = st.number_input("Output Tokens", value=1000, step=100)
 
     with st.expander("Model Spec", expanded=True):
-        param_presets = {"1.5T": 1.5e12, "1T": 1e12, "500B": 500e9, "200B": 200e9, "70B": 70e9}
-        param_preset = st.selectbox("Parameters (preset)", list(param_presets.keys()), index=1)
-        parameters = st.number_input("Parameters (exact)", value=int(param_presets[param_preset]),
-                                     step=int(1e9), format="%d")
-        vocab_size = st.number_input("Vocab Size (V)", value=128000, step=1000)
+        model_presets = {
+            "1T (Generic)": {"params": 1e12, "vocab": 128000, "n_layers": 128, "n_heads": 160},
+            "1.5T (Generic)": {"params": 1.5e12, "vocab": 128000, "n_layers": 128, "n_heads": 160},
+            "Llama 3 (8B)": {"params": 8e9, "vocab": 128256, "n_layers": 32, "n_heads": 32},
+            "Llama 3 (70B)": {"params": 70e9, "vocab": 128256, "n_layers": 80, "n_heads": 64},
+            "Llama 3.1 (405B)": {"params": 405e9, "vocab": 128256, "n_layers": 126, "n_heads": 128},
+            "Mistral (7B)": {"params": 7e9, "vocab": 32000, "n_layers": 32, "n_heads": 32},
+            "Mixtral 8x7B": {"params": 47e9, "vocab": 32000, "n_layers": 32, "n_heads": 32},
+        }
+        preset_name = st.selectbox("Model Preset", list(model_presets.keys()), index=0)
+        preset = model_presets[preset_name]
+        
+        parameters = st.number_input("Parameters", value=int(preset["params"]), step=int(1e9), format="%d")
+        vocab_size = st.number_input("Vocab Size (V)", value=int(preset["vocab"]), step=1000)
         if parameters < 100_000_000:
             d_model = parameters ** 0.25
         else:
             d_model = 2**11 * 10 ** math.log10(parameters / 1e11)
         d_model = round(d_model)
-        n_layers = st.number_input("n_layers", value=128, step=1)
-        n_heads = st.number_input("n_heads", value=160, step=1)
+        n_layers = st.number_input("n_layers", value=int(preset["n_layers"]), step=1)
+        n_heads = st.number_input("n_heads", value=int(preset["n_heads"]), step=1)
         d_head = d_model / n_heads if n_heads > 0 else 0
         d_ff = (parameters / n_layers - 4 * d_model**2) / (3 * d_model) if n_layers > 0 and d_model > 0 else 0
         mfu = st.number_input("MFU", value=0.50, step=0.05, format="%.2f")
