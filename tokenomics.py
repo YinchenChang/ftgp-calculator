@@ -93,7 +93,7 @@ with st.sidebar:
 
     with st.expander("Model Spec", expanded=True):
         model_presets = {
-            "1T (Generic)": {"params": 1e12, "vocab": 128000, "n_layers": 128, "n_heads": 160},
+            "Customized Model": {"params": 1e12, "vocab": 128000, "n_layers": 128, "n_heads": 160},
             "1.5T (Generic)": {"params": 1.5e12, "vocab": 128000, "n_layers": 128, "n_heads": 160},
             "Llama 3 (8B)": {"params": 8e9, "vocab": 128256, "n_layers": 32, "n_heads": 32},
             "Llama 3 (70B)": {"params": 70e9, "vocab": 128256, "n_layers": 80, "n_heads": 64},
