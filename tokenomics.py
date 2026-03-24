@@ -132,7 +132,7 @@ with st.sidebar:
 
     use_nvlink_latency = st.checkbox("NVLink Hop Latency", value=True)
     if use_nvlink_latency:
-        nvlink_latency_us = st.number_input("NVLink latency per hop (μs)", value=1.5, step=0.5, format="%.1f")
+        nvlink_latency_us = st.number_input("NVLink latency per hop (μs)", value=1.0, step=0.5, format="%.1f")
         nvlink_hops = st.number_input("NVLink hops (NVL72 fabric)", value=2, step=1)
     else:
         nvlink_latency_us = 0.0
