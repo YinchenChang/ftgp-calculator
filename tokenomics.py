@@ -81,7 +81,7 @@ with st.sidebar:
     d_ff = (parameters / n_layers - 4 * d_model**2) / (3 * d_model) if n_layers > 0 and d_model > 0 else 0
     mfu = st.number_input("MFU", value=0.50, step=0.05, format="%.2f")
     precision = st.selectbox("Precision", ["FP4", "FP8", "FP16"], index=1)
-    bytes_per_param = {"FP4": 0.5, "FP8": 1, "FP16": 2}[precision]
+    bytes_per_param: float = {"FP4": 0.5, "FP8": 1, "FP16": 2}[precision]
     inference_pflops = {"FP4": rp["fp4_inf"], "FP8": rp["fp8"], "FP16": rp["fp16"]}[precision]
 
     st.subheader("Parallelism & Optimization")
@@ -127,7 +127,7 @@ with st.sidebar:
     if use_pp:
         new_tp_degree = st.number_input("New TP degree (for PP)", value=36, step=1)
     else:
-        new_tp_degree = rp["n_gpu"]  # baseline: full TP, no PP
+        new_tp_degree: int = int(rp["n_gpu"])  # baseline: full TP, no PP
     pp_stages = rp["n_gpu"] / new_tp_degree if new_tp_degree > 0 else 1
 
     use_nvlink_latency = st.checkbox("NVLink Hop Latency", value=True)
@@ -142,11 +142,14 @@ with st.sidebar:
     gpu_utilization = st.number_input("GPU Utilization Rate", value=0.70, step=0.05, format="%.2f")
     uptime = st.number_input("Uptime (scheduled)", value=0.995, step=0.001, format="%.3f")
 
+# ─── Effective decode steps (speculative decoding speedup) ──────────────────
+eff_decode_steps = output_tokens / expected_tokens_accepted if expected_tokens_accepted > 0 else output_tokens
+
 # ─── DERIVED: Rack counts per type ──────────────────────────────────────────
-n_gpu = rp["n_gpu"]
+n_gpu: int = int(rp["n_gpu"])
 n_racks = math.floor(total_power / 1000 / rp["power_per_rack"])
-nvlink_bw = rp["nvlink_bw"]
-mem_bw = rp["mem_bw"]
+nvlink_bw: float = float(rp["nvlink_bw"])
+mem_bw: float = float(rp["mem_bw"])
 
 # Also compute for the *other* rack type (Revenue_Model shows both)
 other_type = "GB200 NVL72" if rack_type == "Vera Rubin NVL72" else "Vera Rubin NVL72"
@@ -183,20 +186,20 @@ pf_compute_mfu = pf_compute_theoretical / mfu if mfu > 0 else 0
 
 # Prefill HBM traffic per layer
 pf_hbm_weights = bytes_per_param * (4 * d_model**2 + 3 * d_model * d_ff)
-pf_hbm_activation = 4 * input_tokens * d_model
-pf_hbm_kv_write = 2 * input_tokens * n_heads * d_head
-pf_hbm_flash = 2 * input_tokens * d_model
+pf_hbm_activation = bytes_per_param * 4 * input_tokens * d_model
+pf_hbm_kv_write = bytes_per_param * 2 * input_tokens * n_heads * d_head
+pf_hbm_flash = bytes_per_param * 2 * input_tokens * d_model
 pf_hbm_per_layer = pf_hbm_weights + pf_hbm_activation + pf_hbm_kv_write + pf_hbm_flash
 pf_hbm_total = pf_hbm_per_layer * n_layers
 pf_hbm_time = pf_hbm_total / (mem_bw * 1e12) if mem_bw > 0 else 0
 
 # Prefill NVLink communication
-pf_nvl_per_allreduce = 2 * (n_gpu - 1) / n_gpu * input_tokens * d_model
+pf_nvl_per_allreduce = bytes_per_param * 2 * (n_gpu - 1) / n_gpu * input_tokens * d_model
 pf_nvl_per_layer = pf_nvl_per_allreduce * 2  # 2 all-reduces per layer
 pf_nvl_total = pf_nvl_per_layer * n_layers
 per_gpu_nvlink_bw = nvlink_bw / n_gpu  # TB/s per GPU
 pf_nvl_time = pf_nvl_total / (per_gpu_nvlink_bw * 1e12) if per_gpu_nvlink_bw > 0 else 0
-pf_nvl_time_sharp = pf_nvl_time * 0.5 if use_nvlink_sharp else pf_nvl_time
+pf_nvl_time_sharp = pf_nvl_time * nvlink_sharp_reduction if use_nvlink_sharp else pf_nvl_time
 
 total_prefill_time = pf_compute_mfu + pf_hbm_time + pf_nvl_time_sharp
 
@@ -211,16 +214,16 @@ dc_out = 2 * 1 * d_model**2
 dc_ffn = 2 * d_model * d_ff * 3
 dc_flop_per_layer = dc_qkv + dc_qkt + dc_atv + dc_out + dc_ffn
 dc_flop_all_layers = dc_flop_per_layer * n_layers
-dc_flop_all_tokens = dc_flop_all_layers * output_tokens
+dc_flop_all_tokens = dc_flop_all_layers * eff_decode_steps
 
 # Decode compute time
 dc_compute_per_tok = dc_flop_all_layers / (inference_pflops * 1e15) if inference_pflops > 0 else 0
-dc_compute_all = dc_compute_per_tok * output_tokens
+dc_compute_all = dc_compute_per_tok * eff_decode_steps
 
 # Decode HBM per layer per token
 dc_hbm_weights = total_params_per_layer * bytes_per_param
-dc_hbm_kv_read = 2 * avg_context * n_heads * d_head
-dc_hbm_kv_write = 2 * 1 * n_heads * d_head
+dc_hbm_kv_read = bytes_per_param * 2 * avg_context * n_heads * d_head
+dc_hbm_kv_write = bytes_per_param * 2 * 1 * n_heads * d_head
 dc_hbm_per_layer = dc_hbm_weights + dc_hbm_kv_read + dc_hbm_kv_write
 dc_hbm_all = dc_hbm_per_layer * n_layers
 dc_hbm_time = dc_hbm_all / (mem_bw * 1e12) if mem_bw > 0 else 0
@@ -232,13 +235,13 @@ dc_nvl_allreduces_all = dc_nvl_allreduces_per_layer * n_layers
 dc_nvl_per_allreduce = 2 * dc_nvl_msg * (n_gpu - 1) / n_gpu
 dc_nvl_traffic = dc_nvl_allreduces_all * dc_nvl_per_allreduce
 dc_nvl_time_raw = dc_nvl_traffic / (per_gpu_nvlink_bw * 1e12) if per_gpu_nvlink_bw > 0 else 0
-dc_nvl_time_sharp = nvlink_time_override if use_nvlink_sharp else dc_nvl_time_raw  # Config override
+dc_nvl_time_sharp = float(nvlink_time_override) if (use_nvlink_sharp and nvlink_time_override is not None) else dc_nvl_time_raw  # Config override
 
 dc_data_time_per_tok = dc_hbm_time + dc_nvl_time_sharp
 dc_total_time_per_tok = dc_compute_per_tok + dc_hbm_time + dc_nvl_time_sharp
 
 # --- GQA Optimization ---
-gqa_kv_per_tok_per_layer = 2 * d_head * gqa_kv_heads
+gqa_kv_per_tok_per_layer = bytes_per_param * 2 * d_head * gqa_kv_heads
 gqa_kv_all_layers_per_tok = gqa_kv_per_tok_per_layer * avg_context * n_layers
 gqa_hbm_traffic = gqa_kv_all_layers_per_tok + weight_memory
 gqa_hbm_time = gqa_hbm_traffic / (mem_bw * 1e12) if mem_bw > 0 else 0
@@ -258,12 +261,12 @@ new_ring_factor = (new_tp_degree - 1) / new_tp_degree if new_tp_degree > 0 else 
 nvl_data_new_tp = 2 * dc_nvl_msg * new_ring_factor
 nvl_traffic_new_tp = nvl_data_new_tp * dc_nvl_allreduces_all
 nvl_time_raw_new = nvl_traffic_new_tp / (per_gpu_nvlink_bw * 1e12) if per_gpu_nvlink_bw > 0 else 0
-nvl_time_sharp_new = nvl_time_raw_new * 0.5 if use_nvlink_sharp else nvl_time_raw_new
+nvl_time_sharp_new = nvl_time_raw_new * nvlink_sharp_reduction if use_nvlink_sharp else nvl_time_raw_new
 nvl_time_optimized = nvl_time_sharp_new * (1 - overlap_efficiency)
-nvl_bw_all_tokens_opt = nvl_time_optimized * output_tokens  # bandwidth component only
+nvl_bw_all_tokens_opt = nvl_time_optimized * eff_decode_steps  # bandwidth component only
 # Hop latency: per-token cost = latency_per_hop × hops × all-reduces; overlap hides same fraction
 nvl_latency_per_tok = nvlink_latency_us * 1e-6 * nvlink_hops * dc_nvl_allreduces_all * (1 - overlap_efficiency)
-nvl_latency_all_tokens = nvl_latency_per_tok * output_tokens
+nvl_latency_all_tokens = nvl_latency_per_tok * eff_decode_steps
 nvl_time_all_tokens_opt = nvl_bw_all_tokens_opt + nvl_latency_all_tokens
 
 # ─── TL_PARAM: TIMELINE ─────────────────────────────────────────────────────
@@ -271,10 +274,10 @@ nvl_time_all_tokens_opt = nvl_bw_all_tokens_opt + nvl_latency_all_tokens
 # Helper: compute for a specific rack type
 def compute_timeline_for_rack(rack_name):
     rr = RACK_PRESETS[rack_name]
-    r_mem_bw = rr["mem_bw"]
-    r_nvlink_bw = rr["nvlink_bw"]
-    r_n_gpu = rr["n_gpu"]
-    r_inference_pflops = {"FP4": rr["fp4_inf"], "FP8": rr["fp8"], "FP16": rr["fp16"]}[precision]
+    r_mem_bw: float = float(rr["mem_bw"])
+    r_nvlink_bw: float = float(rr["nvlink_bw"])
+    r_n_gpu: int = int(rr["n_gpu"])
+    r_inference_pflops: float = float({"FP4": rr["fp4_inf"], "FP8": rr["fp8"], "FP16": rr["fp16"]}[precision])
     r_per_gpu_nvl = r_nvlink_bw / r_n_gpu
 
     # Prefill compute
@@ -284,7 +287,7 @@ def compute_timeline_for_rack(rack_name):
     r_pf_hbm_time = pf_hbm_total / (r_mem_bw * 1e12) if r_mem_bw > 0 else 0
     # Prefill NVLink
     r_pf_nvl_time = pf_nvl_total / (r_per_gpu_nvl * 1e12) if r_per_gpu_nvl > 0 else 0
-    r_pf_nvl_sharp = r_pf_nvl_time * 0.5 if use_nvlink_sharp else r_pf_nvl_time
+    r_pf_nvl_sharp = r_pf_nvl_time * nvlink_sharp_reduction if use_nvlink_sharp else r_pf_nvl_time
 
     # Decode HBM (GQA)
     r_gqa_hbm_traffic = gqa_kv_all_layers_per_tok + weight_memory
@@ -296,14 +299,14 @@ def compute_timeline_for_rack(rack_name):
 
     # Decode NVLink optimized
     r_nvl_time_raw_new = nvl_traffic_new_tp / (r_per_gpu_nvl * 1e12) if r_per_gpu_nvl > 0 else 0
-    r_nvl_time_sharp_new = r_nvl_time_raw_new * 0.5 if use_nvlink_sharp else r_nvl_time_raw_new
+    r_nvl_time_sharp_new = r_nvl_time_raw_new * nvlink_sharp_reduction if use_nvlink_sharp else r_nvl_time_raw_new
     r_nvl_time_optimized = r_nvl_time_sharp_new * (1 - overlap_efficiency)
     r_nvl_latency_per_tok = nvlink_latency_us * 1e-6 * nvlink_hops * dc_nvl_allreduces_all * (1 - overlap_efficiency)
 
     # Timeline steps (fully optimized)
     d_tok = 0.05  # tokenization
-    d_embed_hbm = vocab_size * d_model / (r_mem_bw * 1e12) if r_mem_bw > 0 else 0
-    d_embed_nvl = 2 * input_tokens * d_model * 2 * (71/72) / (r_nvlink_bw * 1e12) if r_nvlink_bw > 0 else 0
+    d_embed_hbm = bytes_per_param * vocab_size * d_model / (r_mem_bw * 1e12) if r_mem_bw > 0 else 0
+    d_embed_nvl = bytes_per_param * 2 * input_tokens * d_model * 2 * (71/72) / (r_nvlink_bw * 1e12) if r_nvlink_bw > 0 else 0
     d_embed = d_embed_hbm + d_embed_nvl
 
     # Prefill (batched): multiply by batch_size
@@ -315,8 +318,8 @@ def compute_timeline_for_rack(rack_name):
     d_decode1 = r_gqa_hbm_time
 
     # Decode all tokens (batch + NVLink opt)
-    d_decode_all_hbm = r_batch_hbm_per_tok * output_tokens * batch_size
-    d_decode_all_nvl = (r_nvl_time_optimized + r_nvl_latency_per_tok) * output_tokens
+    d_decode_all_hbm = r_batch_hbm_per_tok * eff_decode_steps * batch_size
+    d_decode_all_nvl = (r_nvl_time_optimized + r_nvl_latency_per_tok) * eff_decode_steps
     d_decode_all = d_decode_all_hbm + d_decode_all_nvl
 
     d_detok = 0.05
@@ -346,18 +349,18 @@ def compute_timeline_for_rack(rack_name):
 def compute_tl_exact(rack_name):
     """Exact reproduction of TL_Param optimized timeline (rows 25-35)"""
     rr = RACK_PRESETS[rack_name]
-    r_mem_bw = rr["mem_bw"]
-    r_nvlink_bw = rr["nvlink_bw"]
-    r_n_gpu = rr["n_gpu"]
-    r_inference_pflops = {"FP4": rr["fp4_inf"], "FP8": rr["fp8"], "FP16": rr["fp16"]}[precision]
+    r_mem_bw: float = float(rr["mem_bw"])
+    r_nvlink_bw: float = float(rr["nvlink_bw"])
+    r_n_gpu: int = int(rr["n_gpu"])
+    r_inference_pflops: float = float({"FP4": rr["fp4_inf"], "FP8": rr["fp8"], "FP16": rr["fp16"]}[precision])
     r_per_gpu_nvl = r_nvlink_bw / r_n_gpu
 
     # Step 1: Tokenization
     d1 = 0.05
 
     # Step 2: Embedding Lookup + Broadcast
-    g2 = vocab_size * d_model / (r_mem_bw * 1e12) if r_mem_bw > 0 else 0
-    h2 = 2 * input_tokens * d_model * 2 * (71/72) / (r_nvlink_bw * 1e12) if r_nvlink_bw > 0 else 0
+    g2 = bytes_per_param * vocab_size * d_model / (r_mem_bw * 1e12) if r_mem_bw > 0 else 0
+    h2 = bytes_per_param * 2 * input_tokens * d_model * 2 * (71/72) / (r_nvlink_bw * 1e12) if r_nvlink_bw > 0 else 0
     d2 = g2 + h2
 
     # Step 3: Prefill + KV Cache Write (batched)
@@ -367,7 +370,7 @@ def compute_tl_exact(rack_name):
     r_pf_hbm_time = pf_hbm_total / (r_mem_bw * 1e12) if r_mem_bw > 0 else 0
     g3 = r_pf_hbm_time * batch_size
     r_pf_nvl_time = pf_nvl_total / (r_per_gpu_nvl * 1e12) if r_per_gpu_nvl > 0 else 0
-    r_pf_nvl_sharp = r_pf_nvl_time * 0.5 if use_nvlink_sharp else r_pf_nvl_time
+    r_pf_nvl_sharp = r_pf_nvl_time * nvlink_sharp_reduction if use_nvlink_sharp else r_pf_nvl_time
     h3 = r_pf_nvl_sharp * batch_size
     d3 = f3 + h3
 
@@ -379,16 +382,16 @@ def compute_tl_exact(rack_name):
     # Step 5: Decode-All Tokens
     r_batch_hbm_traffic = weight_memory + batch_gqa_kv_total
     r_batch_hbm_per_tok = r_batch_hbm_traffic / (r_mem_bw * 1e12) / batch_size if r_mem_bw > 0 and batch_size > 0 else 0
-    g5 = r_batch_hbm_per_tok * output_tokens * batch_size
+    g5 = r_batch_hbm_per_tok * eff_decode_steps * batch_size
 
     # NVLink optimized
     r_nvl_data_new_tp = 2 * dc_nvl_msg * (new_tp_degree - 1) / new_tp_degree if new_tp_degree > 0 else 0
     r_nvl_traffic_new_tp = r_nvl_data_new_tp * dc_nvl_allreduces_all
     r_nvl_time_raw_new = r_nvl_traffic_new_tp / (r_per_gpu_nvl * 1e12) if r_per_gpu_nvl > 0 else 0
-    r_nvl_time_sharp_new = r_nvl_time_raw_new * 0.5 if use_nvlink_sharp else r_nvl_time_raw_new
+    r_nvl_time_sharp_new = r_nvl_time_raw_new * nvlink_sharp_reduction if use_nvlink_sharp else r_nvl_time_raw_new
     r_nvl_time_optimized = r_nvl_time_sharp_new * (1 - overlap_efficiency)
     r_nvl_latency_per_tok = nvlink_latency_us * 1e-6 * nvlink_hops * dc_nvl_allreduces_all * (1 - overlap_efficiency)
-    h5 = (r_nvl_time_optimized + r_nvl_latency_per_tok) * output_tokens
+    h5 = (r_nvl_time_optimized + r_nvl_latency_per_tok) * eff_decode_steps
     d5 = g5 + h5
 
     # Step 6: De-tokenization
@@ -439,8 +442,8 @@ def compute_tl_for_rack_excel(target_rack):
     # N28/O28 formulas:
     # If selected == VR: D28 is used for VR; for GB200 scale HBM and NVLink
     # If selected != VR: scale for VR, use D28 for GB200
-    g28 = vocab_size * d_model / (mem_bw * 1e12) if mem_bw > 0 else 0
-    h28 = 2 * input_tokens * d_model * 2 * (71/72) / (nvlink_bw * 1e12) if nvlink_bw > 0 else 0
+    g28 = bytes_per_param * vocab_size * d_model / (mem_bw * 1e12) if mem_bw > 0 else 0
+    h28 = bytes_per_param * 2 * input_tokens * d_model * 2 * (71/72) / (nvlink_bw * 1e12) if nvlink_bw > 0 else 0
     d28 = g28 + h28
 
     if target_rack == selected:
@@ -536,7 +539,7 @@ def compute_tl_for_rack_excel(target_rack):
     # Step 5: Decode-All Tokens
     # G31 = WP_Param!B172 * WP_Param!B23 * batch = batch_hbm_time_per_tok * output_tokens * batch_size
     # Wall-clock HBM time: weights read once per output token step for entire batch
-    g31 = batch_hbm_time_per_tok * output_tokens * batch_size
+    g31 = batch_hbm_time_per_tok * eff_decode_steps * batch_size
     # H31 = BW component + hop latency component (latency does not scale with BW ratio)
     h31_bw = nvl_bw_all_tokens_opt   # scales with NVLink BW when cross-rack
     h31_lat = nvl_latency_all_tokens  # same for both racks (same NVL72 fabric topology)
@@ -784,9 +787,9 @@ def _fmt_time(t):
 
 # Build per-step data for the selected rack
 # Step 2 sub-components
-embed_hbm_bytes = vocab_size * d_model + input_tokens * d_model  # embedding table + broadcast
-embed_nvl_bytes = 2 * input_tokens * d_model * 2 * (71/72)
-embed_hbm_time_val = vocab_size * d_model / (mem_bw * 1e12) if mem_bw > 0 else 0
+embed_hbm_bytes = bytes_per_param * (vocab_size * d_model + input_tokens * d_model)  # embedding table + broadcast
+embed_nvl_bytes = bytes_per_param * 2 * input_tokens * d_model * 2 * (71/72)
+embed_hbm_time_val = bytes_per_param * vocab_size * d_model / (mem_bw * 1e12) if mem_bw > 0 else 0
 embed_nvl_time_val = embed_nvl_bytes / (nvlink_bw * 1e12) if nvlink_bw > 0 else 0
 
 # Step 3 sub-components (per-request, then ×batch)
@@ -799,7 +802,7 @@ dc1_hbm_bytes = gqa_hbm_traffic  # weight_memory + GQA KV cache
 # Step 5: decode all tokens
 dc_all_hbm_bytes_per_tok = batch_hbm_traffic  # weight + batch GQA KV
 dc_all_nvl_bytes_per_tok = nvl_traffic_new_tp  # optimized NVLink per tok (before SHARP/overlap)
-dc_all_hbm_bytes_total = dc_all_hbm_bytes_per_tok * output_tokens
+dc_all_hbm_bytes_total = dc_all_hbm_bytes_per_tok * eff_decode_steps
 dc_all_nvl_bytes_total = nvl_bw_all_tokens_opt * per_gpu_nvlink_bw * 1e12  # back-derive bytes from BW component only
 
 # Use selected rack timeline
@@ -866,7 +869,7 @@ flowchart_steps = [
         "duration": sel_tl["steps"][4],
         "compute_flops": dc_flop_all_tokens * batch_size,
         "hbm_bytes": dc_all_hbm_bytes_total,
-        "hbm_time": batch_hbm_time_per_tok * output_tokens * batch_size,
+        "hbm_time": batch_hbm_time_per_tok * eff_decode_steps * batch_size,
         "nvl_bytes": dc_all_nvl_bytes_total,
         "nvl_time": nvl_time_all_tokens_opt,
         "bottleneck": "HBM BW",
@@ -1398,7 +1401,7 @@ with st.expander("🔧 WP_Param — Workload Parameters (selected rack)", expand
         st.write(f"Decode HBM Time/tok (GQA+Batch): {batch_hbm_time_per_tok:.6e}s")
         st.write(f"NVLink Time/tok (optimized): {nvl_time_optimized:.3e}s")
         st.write(f"Weight Memory: {weight_memory/1e12:.2f} TB")
-        st.write(f"GPU Memory Headroom: {(rp['gpu_mem']/n_gpu*1e12 - (parameters*bytes_per_param/n_gpu + 2*d_model*(input_tokens+output_tokens)*n_layers/n_gpu))/1e9:.1f} GB")
+        st.write(f"GPU Memory Headroom: {(float(rp['gpu_mem'])/n_gpu*1e12 - (parameters*bytes_per_param/n_gpu + 2*d_model*(input_tokens+output_tokens)*n_layers/n_gpu))/1e9:.1f} GB")
 
 # ─── Calibration Check ──────────────────────────────────────────────────────
 st.divider()
