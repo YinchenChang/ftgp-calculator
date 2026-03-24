@@ -130,6 +130,14 @@ with st.sidebar:
         new_tp_degree = rp["n_gpu"]  # baseline: full TP, no PP
     pp_stages = rp["n_gpu"] / new_tp_degree if new_tp_degree > 0 else 1
 
+    use_nvlink_latency = st.checkbox("NVLink Hop Latency", value=True)
+    if use_nvlink_latency:
+        nvlink_latency_us = st.number_input("NVLink latency per hop (μs)", value=1.5, step=0.5, format="%.1f")
+        nvlink_hops = st.number_input("NVLink hops (NVL72 fabric)", value=2, step=1)
+    else:
+        nvlink_latency_us = 0.0
+        nvlink_hops = 0
+
     st.subheader("Revenue Parameters")
     gpu_utilization = st.number_input("GPU Utilization Rate", value=0.70, step=0.05, format="%.2f")
     uptime = st.number_input("Uptime (scheduled)", value=0.995, step=0.001, format="%.3f")
@@ -218,7 +226,7 @@ dc_hbm_all = dc_hbm_per_layer * n_layers
 dc_hbm_time = dc_hbm_all / (mem_bw * 1e12) if mem_bw > 0 else 0
 
 # Decode NVLink per token
-dc_nvl_msg = bytes_per_param * d_model
+dc_nvl_msg = bytes_per_param * d_model * batch_size
 dc_nvl_allreduces_per_layer = 2
 dc_nvl_allreduces_all = dc_nvl_allreduces_per_layer * n_layers
 dc_nvl_per_allreduce = 2 * dc_nvl_msg * (n_gpu - 1) / n_gpu
@@ -252,7 +260,11 @@ nvl_traffic_new_tp = nvl_data_new_tp * dc_nvl_allreduces_all
 nvl_time_raw_new = nvl_traffic_new_tp / (per_gpu_nvlink_bw * 1e12) if per_gpu_nvlink_bw > 0 else 0
 nvl_time_sharp_new = nvl_time_raw_new * 0.5 if use_nvlink_sharp else nvl_time_raw_new
 nvl_time_optimized = nvl_time_sharp_new * (1 - overlap_efficiency)
-nvl_time_all_tokens_opt = nvl_time_optimized * output_tokens
+nvl_bw_all_tokens_opt = nvl_time_optimized * output_tokens  # bandwidth component only
+# Hop latency: per-token cost = latency_per_hop × hops × all-reduces; overlap hides same fraction
+nvl_latency_per_tok = nvlink_latency_us * 1e-6 * nvlink_hops * dc_nvl_allreduces_all * (1 - overlap_efficiency)
+nvl_latency_all_tokens = nvl_latency_per_tok * output_tokens
+nvl_time_all_tokens_opt = nvl_bw_all_tokens_opt + nvl_latency_all_tokens
 
 # ─── TL_PARAM: TIMELINE ─────────────────────────────────────────────────────
 
@@ -286,6 +298,7 @@ def compute_timeline_for_rack(rack_name):
     r_nvl_time_raw_new = nvl_traffic_new_tp / (r_per_gpu_nvl * 1e12) if r_per_gpu_nvl > 0 else 0
     r_nvl_time_sharp_new = r_nvl_time_raw_new * 0.5 if use_nvlink_sharp else r_nvl_time_raw_new
     r_nvl_time_optimized = r_nvl_time_sharp_new * (1 - overlap_efficiency)
+    r_nvl_latency_per_tok = nvlink_latency_us * 1e-6 * nvlink_hops * dc_nvl_allreduces_all * (1 - overlap_efficiency)
 
     # Timeline steps (fully optimized)
     d_tok = 0.05  # tokenization
@@ -303,7 +316,7 @@ def compute_timeline_for_rack(rack_name):
 
     # Decode all tokens (batch + NVLink opt)
     d_decode_all_hbm = r_batch_hbm_per_tok * output_tokens * batch_size
-    d_decode_all_nvl = r_nvl_time_optimized * output_tokens
+    d_decode_all_nvl = (r_nvl_time_optimized + r_nvl_latency_per_tok) * output_tokens
     d_decode_all = d_decode_all_hbm + d_decode_all_nvl
 
     d_detok = 0.05
@@ -374,7 +387,8 @@ def compute_tl_exact(rack_name):
     r_nvl_time_raw_new = r_nvl_traffic_new_tp / (r_per_gpu_nvl * 1e12) if r_per_gpu_nvl > 0 else 0
     r_nvl_time_sharp_new = r_nvl_time_raw_new * 0.5 if use_nvlink_sharp else r_nvl_time_raw_new
     r_nvl_time_optimized = r_nvl_time_sharp_new * (1 - overlap_efficiency)
-    h5 = r_nvl_time_optimized * output_tokens
+    r_nvl_latency_per_tok = nvlink_latency_us * 1e-6 * nvlink_hops * dc_nvl_allreduces_all * (1 - overlap_efficiency)
+    h5 = (r_nvl_time_optimized + r_nvl_latency_per_tok) * output_tokens
     d5 = g5 + h5
 
     # Step 6: De-tokenization
@@ -523,8 +537,10 @@ def compute_tl_for_rack_excel(target_rack):
     # G31 = WP_Param!B172 * WP_Param!B23 * batch = batch_hbm_time_per_tok * output_tokens * batch_size
     # Wall-clock HBM time: weights read once per output token step for entire batch
     g31 = batch_hbm_time_per_tok * output_tokens * batch_size
-    # H31 = WP_Param!B206 = nvl_time_all_tokens_opt
-    h31 = nvl_time_all_tokens_opt
+    # H31 = BW component + hop latency component (latency does not scale with BW ratio)
+    h31_bw = nvl_bw_all_tokens_opt   # scales with NVLink BW when cross-rack
+    h31_lat = nvl_latency_all_tokens  # same for both racks (same NVL72 fabric topology)
+    h31 = h31_bw + h31_lat
     d31 = g31 + h31
 
     if selected == "Vera Rubin NVL72":
@@ -533,7 +549,7 @@ def compute_tl_for_rack_excel(target_rack):
             n5_hbm, n5_nvlink = g31, h31
         else:
             n5_hbm = g31 * (vr["mem_bw"] / gb["mem_bw"])
-            n5_nvlink = h31 * (vr["nvlink_bw"] / gb["nvlink_bw"])
+            n5_nvlink = h31_bw * (vr["nvlink_bw"] / gb["nvlink_bw"]) + h31_lat
             n5 = n5_hbm + n5_nvlink
     else:
         if target_rack == "GB200 NVL72":
@@ -541,7 +557,7 @@ def compute_tl_for_rack_excel(target_rack):
             n5_hbm, n5_nvlink = g31, h31
         else:
             n5_hbm = g31 * (gb["mem_bw"] / vr["mem_bw"])
-            n5_nvlink = h31 * (gb["nvlink_bw"] / vr["nvlink_bw"])
+            n5_nvlink = h31_bw * (gb["nvlink_bw"] / vr["nvlink_bw"]) + h31_lat
             n5 = n5_hbm + n5_nvlink
 
     # Step 6: De-tokenization
@@ -784,7 +800,7 @@ dc1_hbm_bytes = gqa_hbm_traffic  # weight_memory + GQA KV cache
 dc_all_hbm_bytes_per_tok = batch_hbm_traffic  # weight + batch GQA KV
 dc_all_nvl_bytes_per_tok = nvl_traffic_new_tp  # optimized NVLink per tok (before SHARP/overlap)
 dc_all_hbm_bytes_total = dc_all_hbm_bytes_per_tok * output_tokens
-dc_all_nvl_bytes_total = nvl_time_all_tokens_opt * per_gpu_nvlink_bw * 1e12  # back-derive bytes from time×BW
+dc_all_nvl_bytes_total = nvl_bw_all_tokens_opt * per_gpu_nvlink_bw * 1e12  # back-derive bytes from BW component only
 
 # Use selected rack timeline
 sel_tl = vr_tl if rack_type == "Vera Rubin NVL72" else gb_tl
