@@ -1,0 +1,367 @@
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'Inter',system-ui,sans-serif; background:#0f172a; color:#e2e8f0; }
+  .fc-container { padding:20px; max-width:1400px; margin:auto; }
+  .fc-title { font-size:14px; color:#94a3b8; margin-bottom:16px; text-align:center; }
+
+  /* Pipeline row */
+  .pipeline { display:flex; align-items:stretch; gap:6px; margin-bottom:24px; position:relative; }
+  .step-box {
+    flex:1; border-radius:12px; padding:12px 10px; position:relative; overflow:hidden;
+    border:1px solid rgba(255,255,255,0.08); cursor:pointer; transition:all 0.3s;
+    min-width:0;
+  }
+  .step-box:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(0,0,0,0.4); }
+  .step-box.active { border-color:rgba(255,255,255,0.4); transform:translateY(-3px);
+    box-shadow:0 8px 25px rgba(0,0,0,0.4); }
+  .step-num { font-size:11px; font-weight:700; opacity:0.5; }
+  .step-name { font-size:13px; font-weight:700; line-height:1.2; margin:4px 0 2px; }
+  .step-sub { font-size:10px; opacity:0.6; line-height:1.2; }
+  .step-dur { font-size:18px; font-weight:700; margin:8px 0 4px; }
+  .step-pct { font-size:11px; opacity:0.7; }
+  .step-bneck { font-size:10px; padding:2px 6px; border-radius:4px; display:inline-block;
+    margin-top:6px; font-weight:600; }
+  .bneck-cpu { background:#334155; color:#94a3b8; }
+  .bneck-compute { background:#831843; color:#f9a8d4; }
+  .bneck-hbm { background:#78350f; color:#fcd34d; }
+  .bneck-nvlink { background:#1e3a5f; color:#7dd3fc; }
+
+  /* Animated progress bar inside each step */
+  .step-progress {
+    position:absolute; bottom:0; left:0; height:3px; border-radius:0 0 12px 12px;
+    transition:width 0.05s linear;
+  }
+
+  /* Arrow connectors */
+  .arrow { display:flex; align-items:center; color:#475569; font-size:18px; flex-shrink:0; }
+
+  /* Detail panel */
+  .detail-panel {
+    background:#1e293b; border-radius:12px; padding:20px; margin-bottom:24px;
+    border:1px solid rgba(255,255,255,0.08); min-height:180px;
+    display:grid; grid-template-columns:1fr 1fr 1fr; gap:20px;
+  }
+  .detail-section h4 { font-size:12px; font-weight:600; text-transform:uppercase;
+    letter-spacing:0.5px; margin-bottom:10px; }
+  .detail-row { display:flex; justify-content:space-between; padding:3px 0; font-size:12px; }
+  .detail-row .label { color:#94a3b8; }
+  .detail-row .value { font-weight:600; font-variant-numeric:tabular-nums; }
+
+  /* Resource bars */
+  .resource-bars { margin-top:10px; }
+  .rbar { display:flex; align-items:center; gap:8px; margin:4px 0; }
+  .rbar-label { font-size:10px; width:55px; text-align:right; color:#94a3b8; flex-shrink:0; }
+  .rbar-track { flex:1; height:14px; background:#0f172a; border-radius:7px; overflow:hidden; position:relative; }
+  .rbar-fill { height:100%; border-radius:7px; transition:width 0.6s ease; position:relative; }
+  .rbar-fill span { position:absolute; right:4px; top:0; font-size:9px; line-height:14px; font-weight:600; }
+  .rbar-compute { background:linear-gradient(90deg,#ec4899,#f472b6); }
+  .rbar-hbm { background:linear-gradient(90deg,#f59e0b,#fbbf24); }
+  .rbar-nvlink { background:linear-gradient(90deg,#3b82f6,#60a5fa); }
+
+  /* Timeline bar */
+  .timeline { position:relative; height:40px; background:#1e293b; border-radius:8px;
+    overflow:hidden; margin-bottom:8px; }
+  .tl-seg { position:absolute; top:0; height:100%; display:flex; align-items:center;
+    justify-content:center; font-size:10px; font-weight:600; border-right:1px solid #0f172a;
+    transition:opacity 0.3s; overflow:hidden; white-space:nowrap; }
+  .tl-cursor { position:absolute; top:0; width:2px; height:100%; background:#fff;
+    box-shadow:0 0 8px rgba(255,255,255,0.8); transition:left 0.05s linear; z-index:10; }
+  .tl-labels { display:flex; justify-content:space-between; font-size:11px; color:#64748b; }
+
+  /* Controls */
+  .controls { display:flex; align-items:center; gap:12px; margin-bottom:20px; justify-content:center; }
+  .btn {
+    padding:8px 20px; border-radius:8px; border:1px solid #334155; background:#1e293b;
+    color:#e2e8f0; font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s;
+  }
+  .btn:hover { background:#334155; }
+  .btn.playing { background:#3b82f6; border-color:#3b82f6; }
+  .speed-label { font-size:12px; color:#94a3b8; }
+
+  /* Token particles */
+  .particles { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:5; }
+  .particle {
+    position:absolute; width:6px; height:6px; border-radius:50%;
+    background:#fbbf24; box-shadow:0 0 6px rgba(251,191,36,0.6);
+    animation:particleFade 0.8s ease-out forwards;
+  }
+  @keyframes particleFade {
+    0% { opacity:1; transform:scale(1); }
+    100% { opacity:0; transform:scale(0.3) translateY(-10px); }
+  }
+
+  /* E2E summary */
+  .e2e-summary {
+    text-align:center; margin:16px 0 8px; font-size:14px; color:#94a3b8;
+  }
+  .e2e-summary strong { color:#fbbf24; font-size:20px; }
+</style>
+
+<div class="fc-container" id="fcApp">
+  <div class="fc-title">Selected Rack: <strong>$rack_type</strong> &nbsp;|&nbsp;
+    Model: $model_size_t &nbsp;|&nbsp; I/O: $input_tokens/$output_tokens tokens
+    &nbsp;|&nbsp; Batch: $batch_size</div>
+
+  <div class="controls">
+    <button class="btn" id="playBtn" onclick="togglePlay()">Play</button>
+    <span class="speed-label">Speed:</span>
+    <button class="btn" onclick="setSpeed(0.5)">0.5x</button>
+    <button class="btn" id="sp1" onclick="setSpeed(1)">1x</button>
+    <button class="btn" onclick="setSpeed(3)">3x</button>
+    <button class="btn" onclick="setSpeed(10)">10x</button>
+    <button class="btn" onclick="resetAnim()">Reset</button>
+  </div>
+
+  <div class="pipeline" id="pipeline"></div>
+
+  <div class="detail-panel" id="detailPanel"></div>
+
+  <div style="margin-bottom:4px;font-size:12px;color:#64748b;font-weight:600;">
+    Cumulative Timeline</div>
+  <div class="timeline" id="timeline"></div>
+  <div class="tl-labels">
+    <span>0s</span>
+    <span id="tlEnd">$e2e_fmt</span>
+  </div>
+
+  <div class="e2e-summary">
+    E2E Latency: <strong>$e2e_fmt</strong>
+    &nbsp;&nbsp;|&nbsp;&nbsp; Output tok/s: <strong>$tok_per_sec</strong>
+  </div>
+</div>
+
+<script>
+const STEPS = $steps_json;
+const E2E = $e2e_total;
+let speed = 1, playing = false, animTime = 0, animFrame = null, lastTs = null;
+let activeStep = 0;
+
+// Build pipeline boxes
+const pipeline = document.getElementById('pipeline');
+STEPS.forEach((s, i) => {
+  if (i > 0) {
+    const arrow = document.createElement('div');
+    arrow.className = 'arrow';
+    arrow.innerHTML = '&#9654;';
+    pipeline.appendChild(arrow);
+  }
+  const box = document.createElement('div');
+  box.className = 'step-box';
+  box.style.background = `linear-gradient(135deg, $${s.color}22, $${s.color}11)`;
+  box.id = 'step-' + s.id;
+  box.onclick = () => showDetail(i);
+
+  const bneckClass = s.bottleneck === 'CPU' ? 'bneck-cpu' :
+    s.bottleneck === 'Compute' ? 'bneck-compute' :
+    s.bottleneck.includes('HBM') ? 'bneck-hbm' : 'bneck-nvlink';
+
+  const pct = E2E > 0 ? (s.duration / E2E * 100) : 0;
+
+  box.innerHTML = `
+    <div class="step-num">STEP $${s.id}</div>
+    <div class="step-name">$${s.name}</div>
+    <div class="step-sub">$${s.subtitle}</div>
+    <div class="step-dur">$${s.duration_fmt}</div>
+    <div class="step-pct">$${pct.toFixed(1)}% of E2E</div>
+    <div class="step-bneck $${bneckClass}">$${s.bottleneck}</div>
+    <div class="step-progress" style="background:$${s.color};width:0%"></div>
+    <div class="particles"></div>
+  `;
+  pipeline.appendChild(box);
+});
+
+// Build timeline segments
+const tl = document.getElementById('timeline');
+let cumPct = 0;
+STEPS.forEach((s, i) => {
+  const pct = E2E > 0 ? (s.duration / E2E * 100) : 0;
+  const seg = document.createElement('div');
+  seg.className = 'tl-seg';
+  seg.style.left = cumPct + '%';
+  seg.style.width = pct + '%';
+  seg.style.background = s.color + '88';
+  seg.innerHTML = pct > 5 ? s.name : '';
+  seg.id = 'tl-seg-' + i;
+  tl.appendChild(seg);
+  cumPct += pct;
+});
+// cursor
+const cursor = document.createElement('div');
+cursor.className = 'tl-cursor';
+cursor.style.left = '0%';
+cursor.id = 'tlCursor';
+tl.appendChild(cursor);
+
+function showDetail(idx) {
+  activeStep = idx;
+  const s = STEPS[idx];
+  const dp = document.getElementById('detailPanel');
+
+  // Find max values for bar scaling
+  const maxFlops = Math.max(...STEPS.map(x => x.compute_flops || 0)) || 1;
+  const maxHBM = Math.max(...STEPS.map(x => x.hbm_bytes || 0)) || 1;
+  const maxNVL = Math.max(...STEPS.map(x => x.nvl_bytes || 0)) || 1;
+  const maxTime = Math.max(...STEPS.map(x => x.duration || 0)) || 1;
+
+  const computePct = s.compute_flops / maxFlops * 100;
+  const hbmPct = s.hbm_bytes / maxHBM * 100;
+  const nvlPct = s.nvl_bytes / maxNVL * 100;
+
+  // Time breakdown bars (within this step)
+  const stepMax = Math.max(s.hbm_time, s.nvl_time, s.duration) || 1;
+  const hbmTimePct = s.hbm_time / stepMax * 100;
+  const nvlTimePct = s.nvl_time / stepMax * 100;
+
+  dp.innerHTML = `
+    <div class="detail-section">
+      <h4 style="color:$${s.color}">Step $${s.id}: $${s.name} $${s.subtitle}</h4>
+      <div class="detail-row"><span class="label">Total Duration</span><span class="value">$${s.duration_fmt}</span></div>
+      <div class="detail-row"><span class="label">Per Output Token</span><span class="value">$${s.per_tok_fmt}</span></div>
+      <div class="detail-row"><span class="label">All Output Tokens</span><span class="value">$${s.all_tok_fmt}</span></div>
+      <div class="detail-row"><span class="label">Bottleneck</span><span class="value">$${s.bottleneck}</span></div>
+      <div class="detail-row"><span class="label">% of E2E</span><span class="value">$${(s.duration/E2E*100).toFixed(2)}%</span></div>
+      <div class="detail-row"><span class="label">Compute FLOPs</span><span class="value">$${s.compute_fmt}</span></div>
+    </div>
+    <div class="detail-section">
+      <h4 style="color:#fbbf24">Data Transit</h4>
+      <div class="detail-row"><span class="label">HBM Traffic</span><span class="value">$${s.hbm_bytes_fmt}</span></div>
+      <div class="detail-row"><span class="label">HBM Time</span><span class="value">$${s.hbm_time_fmt}</span></div>
+      <div class="detail-row"><span class="label">NVLink Traffic</span><span class="value">$${s.nvl_bytes_fmt}</span></div>
+      <div class="detail-row"><span class="label">NVLink Time</span><span class="value">$${s.nvl_time_fmt}</span></div>
+      <div class="resource-bars">
+        <div class="rbar">
+          <span class="rbar-label">HBM</span>
+          <div class="rbar-track"><div class="rbar-fill rbar-hbm" style="width:$${hbmTimePct.toFixed(1)}%"><span>$${s.hbm_time_fmt}</span></div></div>
+        </div>
+        <div class="rbar">
+          <span class="rbar-label">NVLink</span>
+          <div class="rbar-track"><div class="rbar-fill rbar-nvlink" style="width:$${nvlTimePct.toFixed(1)}%"><span>$${s.nvl_time_fmt}</span></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="detail-section">
+      <h4 style="color:#a78bfa">Resource Scale (vs. max step)</h4>
+      <div class="resource-bars">
+        <div class="rbar">
+          <span class="rbar-label">Compute</span>
+          <div class="rbar-track"><div class="rbar-fill rbar-compute" style="width:$${computePct.toFixed(1)}%"><span>$${s.compute_fmt}</span></div></div>
+        </div>
+        <div class="rbar">
+          <span class="rbar-label">HBM</span>
+          <div class="rbar-track"><div class="rbar-fill rbar-hbm" style="width:$${hbmPct.toFixed(1)}%"><span>$${s.hbm_bytes_fmt}</span></div></div>
+        </div>
+        <div class="rbar">
+          <span class="rbar-label">NVLink</span>
+          <div class="rbar-track"><div class="rbar-fill rbar-nvlink" style="width:$${nvlPct.toFixed(1)}%"><span>$${s.nvl_bytes_fmt}</span></div></div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Highlight active step box
+  document.querySelectorAll('.step-box').forEach((b, bi) => {
+    b.classList.toggle('active', bi === idx);
+  });
+}
+
+// Animation
+function togglePlay() {
+  playing = !playing;
+  document.getElementById('playBtn').textContent = playing ? 'Pause' : 'Play';
+  document.getElementById('playBtn').classList.toggle('playing', playing);
+  if (playing) {
+    lastTs = null;
+    animFrame = requestAnimationFrame(tick);
+  } else if (animFrame) {
+    cancelAnimationFrame(animFrame);
+  }
+}
+
+function setSpeed(s) {
+  speed = s;
+  document.querySelectorAll('.controls .btn').forEach(b => {
+    if (b.textContent === s + 'x') b.classList.add('playing');
+    else if (b.id !== 'playBtn') b.classList.remove('playing');
+  });
+}
+
+function resetAnim() {
+  playing = false;
+  animTime = 0;
+  lastTs = null;
+  document.getElementById('playBtn').textContent = 'Play';
+  document.getElementById('playBtn').classList.remove('playing');
+  if (animFrame) cancelAnimationFrame(animFrame);
+  updateVisuals();
+}
+
+function tick(ts) {
+  if (!playing) return;
+  if (lastTs === null) lastTs = ts;
+  const dt = (ts - lastTs) / 1000 * speed;
+  lastTs = ts;
+  animTime = Math.min(animTime + dt, E2E);
+  updateVisuals();
+  if (animTime < E2E) {
+    animFrame = requestAnimationFrame(tick);
+  } else {
+    // Auto-reset after a brief pause
+    setTimeout(() => {
+      playing = false;
+      animTime = 0;
+      lastTs = null;
+      document.getElementById('playBtn').textContent = 'Play';
+      document.getElementById('playBtn').classList.remove('playing');
+      updateVisuals();
+      showDetail(0);
+    }, 800);
+  }
+}
+
+let particleCounter = 0;
+function updateVisuals() {
+  let cumTime = 0;
+  STEPS.forEach((s, i) => {
+    const box = document.getElementById('step-' + s.id);
+    const prog = box.querySelector('.step-progress');
+    const start = cumTime;
+    const end = cumTime + s.duration;
+    let pct = 0;
+    if (animTime >= end) pct = 100;
+    else if (animTime > start) pct = (animTime - start) / s.duration * 100;
+    prog.style.width = pct + '%';
+
+    // Auto-select detail for current step
+    if (animTime >= start && animTime < end && activeStep !== i) {
+      showDetail(i);
+    }
+
+    // Spawn particles during active step
+    if (pct > 0 && pct < 100 && playing) {
+      particleCounter++;
+      const pDiv = box.querySelector('.particles');
+      if (particleCounter % 3 === 0 && pDiv.childElementCount < 20) {
+        const p = document.createElement('div');
+        p.className = 'particle';
+        p.style.left = pct + '%';
+        p.style.top = (20 + Math.random() * 60) + '%';
+        p.style.background = s.color;
+        p.style.boxShadow = '0 0 6px ' + s.color + '99';
+        pDiv.appendChild(p);
+        setTimeout(() => p.remove(), 800);
+      }
+    }
+
+    cumTime = end;
+  });
+
+  // Timeline cursor
+  const cursorPct = E2E > 0 ? (animTime / E2E * 100) : 0;
+  document.getElementById('tlCursor').style.left = cursorPct + '%';
+}
+
+// Initialize
+showDetail(0);
+setSpeed(1);
+</script>
