@@ -74,6 +74,7 @@ with st.sidebar:
         c_fp8 = st.number_input("FP8 Dense", value=float(base_rp["fp8"]), disabled=not is_custom)
         c_fp16 = st.number_input("FP16/BF16 Dense", value=float(base_rp["fp16"]), disabled=not is_custom)
         c_power = st.number_input("Power per Rack (kW)", value=float(base_rp["power_per_rack"]), disabled=not is_custom)
+        c_rack_price = st.number_input("Rack Price ($)", value=int(base_rp["rack_price"]), step=100_000, format="%d", disabled=not is_custom)
 
         rp = {
             "gpu_type": c_gpu_type, "n_gpu": c_n_gpu,
@@ -82,7 +83,7 @@ with st.sidebar:
             "fp4_inf": c_fp4_inf, "fp4_train": c_fp4_train,
             "fp8": c_fp8, "fp16": c_fp16,
             "power_per_rack": c_power,
-            "n_cpu": base_rp["n_cpu"], "cpu_type": base_rp["cpu_type"], "rack_price": base_rp["rack_price"]
+            "n_cpu": base_rp["n_cpu"], "cpu_type": base_rp["cpu_type"], "rack_price": c_rack_price
         }
         if is_custom:
             RACK_PRESETS["Customized Rack"] = rp
@@ -115,6 +116,9 @@ with st.sidebar:
         n_heads = st.number_input("n_heads", value=int(preset["n_heads"]), step=1)
         d_head = d_model / n_heads if n_heads > 0 else 0
         d_ff = (parameters / n_layers - 4 * d_model**2) / (3 * d_model) if n_layers > 0 and d_model > 0 else 0
+        if d_ff < 0:
+            st.warning(f"Derived d_ff is negative ({d_ff:,.0f}). Model parameters may be too small for the given n_layers/n_heads. Results may be unreliable.")
+            d_ff = max(d_ff, 0)
         mfu = st.number_input("MFU", value=0.50, step=0.05, format="%.2f")
         precision = st.selectbox("Precision", ["FP4", "FP8", "FP16"], index=1)
         bytes_per_param: float = {"FP4": 0.5, "FP8": 1, "FP16": 2}[precision]
@@ -307,146 +311,7 @@ nvl_time_all_tokens_opt = nvl_bw_all_tokens_opt + nvl_latency_all_tokens
 
 # ─── TL_PARAM: TIMELINE ─────────────────────────────────────────────────────
 
-# Helper: compute for a specific rack type
-def compute_timeline_for_rack(rack_name):
-    rr = RACK_PRESETS[rack_name]
-    r_mem_bw: float = float(rr["mem_bw"])
-    r_nvlink_bw: float = float(rr["nvlink_bw"])
-    r_n_gpu: int = int(rr["n_gpu"])
-    r_inference_pflops: float = float({"FP4": rr["fp4_inf"], "FP8": rr["fp8"], "FP16": rr["fp16"]}[precision])
-    r_per_gpu_nvl = r_nvlink_bw / r_n_gpu
-
-    # Prefill compute
-    r_pf_compute_th = pf_flop_total / (r_inference_pflops * 1e15) if r_inference_pflops > 0 else 0
-    r_pf_compute = r_pf_compute_th / mfu if mfu > 0 else 0
-    # Prefill HBM
-    r_pf_hbm_time = pf_hbm_total / (r_mem_bw * 1e12) if r_mem_bw > 0 else 0
-    # Prefill NVLink
-    r_pf_nvl_time = pf_nvl_total / (r_per_gpu_nvl * 1e12) if r_per_gpu_nvl > 0 else 0
-    r_pf_nvl_sharp = r_pf_nvl_time * nvlink_sharp_reduction if use_nvlink_sharp else r_pf_nvl_time
-
-    # Decode HBM (GQA)
-    r_gqa_hbm_traffic = gqa_kv_all_layers_per_tok + weight_memory
-    r_gqa_hbm_time = r_gqa_hbm_traffic / (r_mem_bw * 1e12) if r_mem_bw > 0 else 0
-
-    # Decode HBM (batch)
-    r_batch_hbm_traffic = weight_memory + batch_gqa_kv_total
-    r_batch_hbm_per_tok = r_batch_hbm_traffic / (r_mem_bw * 1e12) / batch_size if r_mem_bw > 0 and batch_size > 0 else 0
-
-    # Decode NVLink optimized
-    r_nvl_time_raw_new = nvl_traffic_new_tp / (r_per_gpu_nvl * 1e12) if r_per_gpu_nvl > 0 else 0
-    r_nvl_time_sharp_new = r_nvl_time_raw_new * nvlink_sharp_reduction if use_nvlink_sharp else r_nvl_time_raw_new
-    r_nvl_time_optimized = r_nvl_time_sharp_new * (1 - overlap_efficiency)
-    r_nvl_latency_per_tok = nvlink_latency_us * 1e-6 * nvlink_hops * dc_nvl_allreduces_all * (1 - overlap_efficiency)
-
-    # Timeline steps (fully optimized)
-    d_tok = 0.05  # tokenization
-    d_embed_hbm = bytes_per_param * vocab_size * d_model / (r_mem_bw * 1e12) if r_mem_bw > 0 else 0
-    d_embed_nvl = bytes_per_param * 2 * input_tokens * d_model * 2 * (71/72) / (r_nvlink_bw * 1e12) if r_nvlink_bw > 0 else 0
-    d_embed = d_embed_hbm + d_embed_nvl
-
-    # Prefill (batched): multiply by batch_size
-    d_prefill_f = r_pf_compute * batch_size
-    d_prefill_h = r_pf_nvl_sharp * batch_size
-    d_prefill = d_prefill_f + d_prefill_h
-
-    # Decode first token (GQA)
-    d_decode1 = r_gqa_hbm_time
-
-    # Decode all tokens (batch + NVLink opt)
-    d_decode_all_hbm = r_batch_hbm_per_tok * eff_decode_steps * batch_size
-    d_decode_all_nvl = (r_nvl_time_optimized + r_nvl_latency_per_tok) * eff_decode_steps
-    d_decode_all = d_decode_all_hbm + d_decode_all_nvl
-
-    d_detok = 0.05
-
-    e2e = d_tok + d_embed + d_prefill + d_decode1 + d_decode_all + d_detok
-    avg_time_per_tok = e2e / (batch_size * output_tokens) if batch_size > 0 and output_tokens > 0 else 0
-    tok_per_sec = 1 / avg_time_per_tok if avg_time_per_tok > 0 else 0
-
-    # E2E through decode-all (excluding detokenization)
-    e2e_through_decode = d_tok + d_embed + d_prefill + d_decode1 + d_decode_all
-
-    return dict(
-        d_tok=d_tok, d_embed=d_embed, d_prefill=d_prefill,
-        d_decode1=d_decode1, d_decode_all=d_decode_all, d_detok=d_detok,
-        e2e=e2e, e2e_through_decode=e2e_through_decode,
-        avg_time_per_tok=avg_time_per_tok, tok_per_sec=tok_per_sec,
-        # Sub-components for display
-        pf_compute=d_prefill_f, pf_hbm=r_pf_hbm_time * batch_size,
-        pf_nvl=d_prefill_h,
-        dc_hbm_per_tok=r_batch_hbm_per_tok,
-        dc_nvl_opt=r_nvl_time_optimized,
-    )
-
-
-# The Excel uses a specific formula structure for the "fully optimized" timeline.
-# Let me reproduce it exactly as in TL_Param rows 25-35:
-def compute_tl_exact(rack_name):
-    """Exact reproduction of TL_Param optimized timeline (rows 25-35)"""
-    rr = RACK_PRESETS[rack_name]
-    r_mem_bw: float = float(rr["mem_bw"])
-    r_nvlink_bw: float = float(rr["nvlink_bw"])
-    r_n_gpu: int = int(rr["n_gpu"])
-    r_inference_pflops: float = float({"FP4": rr["fp4_inf"], "FP8": rr["fp8"], "FP16": rr["fp16"]}[precision])
-    r_per_gpu_nvl = r_nvlink_bw / r_n_gpu
-
-    # Step 1: Tokenization
-    d1 = 0.05
-
-    # Step 2: Embedding Lookup + Broadcast
-    g2 = bytes_per_param * vocab_size * d_model / (r_mem_bw * 1e12) if r_mem_bw > 0 else 0
-    h2 = bytes_per_param * 2 * input_tokens * d_model * 2 * (71/72) / (r_nvlink_bw * 1e12) if r_nvlink_bw > 0 else 0
-    d2 = g2 + h2
-
-    # Step 3: Prefill + KV Cache Write (batched)
-    r_pf_compute_th = pf_flop_total / (r_inference_pflops * 1e15) if r_inference_pflops > 0 else 0
-    r_pf_compute = r_pf_compute_th / mfu if mfu > 0 else 0
-    f3 = r_pf_compute * batch_size
-    r_pf_hbm_time = pf_hbm_total / (r_mem_bw * 1e12) if r_mem_bw > 0 else 0
-    g3 = r_pf_hbm_time * batch_size
-    r_pf_nvl_time = pf_nvl_total / (r_per_gpu_nvl * 1e12) if r_per_gpu_nvl > 0 else 0
-    r_pf_nvl_sharp = r_pf_nvl_time * nvlink_sharp_reduction if use_nvlink_sharp else r_pf_nvl_time
-    h3 = r_pf_nvl_sharp * batch_size
-    d3 = f3 + h3
-
-    # Step 4: Decode-First Token (GQA)
-    r_gqa_hbm_traffic = gqa_kv_all_layers_per_tok + weight_memory
-    r_gqa_hbm_time = r_gqa_hbm_traffic / (r_mem_bw * 1e12) if r_mem_bw > 0 else 0
-    d4 = r_gqa_hbm_time
-
-    # Step 5: Decode-All Tokens
-    r_batch_hbm_traffic = weight_memory + batch_gqa_kv_total
-    r_batch_hbm_per_tok = r_batch_hbm_traffic / (r_mem_bw * 1e12) / batch_size if r_mem_bw > 0 and batch_size > 0 else 0
-    g5 = r_batch_hbm_per_tok * eff_decode_steps * batch_size
-
-    # NVLink optimized
-    r_nvl_data_new_tp = 2 * dc_nvl_msg * (new_tp_degree - 1) / new_tp_degree if new_tp_degree > 0 else 0
-    r_nvl_traffic_new_tp = r_nvl_data_new_tp * dc_nvl_allreduces_all
-    r_nvl_time_raw_new = r_nvl_traffic_new_tp / (r_per_gpu_nvl * 1e12) if r_per_gpu_nvl > 0 else 0
-    r_nvl_time_sharp_new = r_nvl_time_raw_new * nvlink_sharp_reduction if use_nvlink_sharp else r_nvl_time_raw_new
-    r_nvl_time_optimized = r_nvl_time_sharp_new * (1 - overlap_efficiency)
-    r_nvl_latency_per_tok = nvlink_latency_us * 1e-6 * nvlink_hops * dc_nvl_allreduces_all * (1 - overlap_efficiency)
-    h5 = (r_nvl_time_optimized + r_nvl_latency_per_tok) * eff_decode_steps
-    d5 = g5 + h5
-
-    # Step 6: De-tokenization
-    d6 = 0.05
-
-    e2e = d1 + d2 + d3 + d4 + d5 + d6
-    e2e_through_decode = d1 + d2 + d3 + d4 + d5
-    avg_tok = e2e / (batch_size * output_tokens) if batch_size > 0 and output_tokens > 0 else 0
-    tps = 1 / avg_tok if avg_tok > 0 else 0
-
-    return dict(
-        steps=[d1, d2, d3, d4, d5, d6],
-        e2e=e2e, e2e_through_decode=e2e_through_decode,
-        avg_time_per_tok=avg_tok, tok_per_sec=tps,
-        f3=f3, g3=g3, h3=h3, g5=g5, h5=h5, d4=d4,
-    )
-
-
-# However the Excel TL_Param uses cross-rack scaling for the N/O columns.
+# The Excel TL_Param uses cross-rack scaling for the N/O columns.
 # Let me reproduce the exact Excel formulas for the "Rack-Independent" outputs.
 # The Excel computes everything using the *selected* rack, then scales to the other rack
 # using hardware ratios. But looking more closely, N27:N32 compute VR-specific values
@@ -479,7 +344,7 @@ def compute_tl_for_rack_excel(target_rack):
     # If selected == VR: D28 is used for VR; for GB200 scale HBM and NVLink
     # If selected != VR: scale for VR, use D28 for GB200
     g28 = bytes_per_param * vocab_size * d_model / (mem_bw * 1e12) if mem_bw > 0 else 0
-    h28 = bytes_per_param * 2 * input_tokens * d_model * 2 * (71/72) / (nvlink_bw * 1e12) if nvlink_bw > 0 else 0
+    h28 = bytes_per_param * 2 * input_tokens * d_model * 2 * ((n_gpu - 1) / n_gpu) / (nvlink_bw * 1e12) if nvlink_bw > 0 else 0
     d28 = g28 + h28
 
     if target_rack == selected:
@@ -549,10 +414,13 @@ def compute_tl_for_rack_excel(target_rack):
     )
 
 
-vr_tl = compute_tl_for_rack_excel("Vera Rubin NVL72")
-gb_tl = compute_tl_for_rack_excel("GB200 NVL72")
+rack_names = ["Vera Rubin NVL72", "GB200 NVL72"]
 if rack_type == "Customized Rack":
-    cust_tl = compute_tl_for_rack_excel("Customized Rack")
+    rack_names.append("Customized Rack")
+
+tl_results = {name: compute_tl_for_rack_excel(name) for name in rack_names}
+vr_tl = tl_results["Vera Rubin NVL72"]
+gb_tl = tl_results["GB200 NVL72"]
 
 
 # ─── DC_COST_MODEL ──────────────────────────────────────────────────────────
@@ -626,10 +494,9 @@ def compute_dc_cost(rack_name):
     )
 
 
-vr_dc = compute_dc_cost("Vera Rubin NVL72")
-gb_dc = compute_dc_cost("GB200 NVL72")
-if rack_type == "Customized Rack":
-    cust_dc = compute_dc_cost("Customized Rack")
+dc_results = {name: compute_dc_cost(name) for name in rack_names}
+vr_dc = dc_results["Vera Rubin NVL72"]
+gb_dc = dc_results["GB200 NVL72"]
 
 
 # ─── REVENUE MODEL ──────────────────────────────────────────────────────────
@@ -648,8 +515,8 @@ def compute_revenue(tl, dc, rack_name):
     annual_input_m = annual_input_tokens / 1e6
     annual_output_m = annual_output_tokens / 1e6
 
-    tokens_per_sec = annual_total_tokens / (8760 * 3600) if True else 0
-    requests_per_sec = total_requests_yr / (8760 * 3600) if True else 0
+    tokens_per_sec = annual_total_tokens / (8760 * 3600)
+    requests_per_sec = total_requests_yr / (8760 * 3600)
 
     input_revenue = annual_input_m * input_price / 1e6
     output_revenue = annual_output_m * output_price / 1e6
@@ -674,10 +541,9 @@ def compute_revenue(tl, dc, rack_name):
     )
 
 
-vr_rev = compute_revenue(vr_tl, vr_dc, "Vera Rubin NVL72")
-gb_rev = compute_revenue(gb_tl, gb_dc, "GB200 NVL72")
-if rack_type == "Customized Rack":
-    cust_rev = compute_revenue(cust_tl, cust_dc, "Customized Rack")
+rev_results = {name: compute_revenue(tl_results[name], dc_results[name], name) for name in rack_names}
+vr_rev = rev_results["Vera Rubin NVL72"]
+gb_rev = rev_results["GB200 NVL72"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -708,36 +574,18 @@ with st.expander("📋 Config Summary", expanded=False):
 
 # ─── Key Metrics ─────────────────────────────────────────────────────────────
 st.header("Key Metrics")
-m1, m2, m3, m4 = st.columns(4)
-with m1:
-    st.metric("VR E2E Latency (s)", f"{vr_tl['e2e']:.6f}")
-with m2:
-    st.metric("VR Output tok/s", f"{vr_tl['tok_per_sec']:,.1f}")
-with m3:
-    st.metric("VR Annual Revenue ($M)", f"{vr_rev['total_revenue']:,.1f}")
-with m4:
-    st.metric("VR Rev/OpEx Ratio", f"{vr_rev['rev_to_opex']:.1f}x")
-
-m5, m6, m7, m8 = st.columns(4)
-with m5:
-    st.metric("GB200 E2E Latency (s)", f"{gb_tl['e2e']:.6f}")
-with m6:
-    st.metric("GB200 Output tok/s", f"{gb_tl['tok_per_sec']:,.1f}")
-with m7:
-    st.metric("GB200 Annual Revenue ($M)", f"{gb_rev['total_revenue']:,.1f}")
-with m8:
-    st.metric("GB200 Rev/OpEx Ratio", f"{gb_rev['rev_to_opex']:.1f}x")
-
-if rack_type == "Customized Rack":
-    m9, m10, m11, m12 = st.columns(4)
-    with m9:
-        st.metric("Custom E2E Latency (s)", f"{cust_tl['e2e']:.6f}")
-    with m10:
-        st.metric("Custom Output tok/s", f"{cust_tl['tok_per_sec']:,.1f}")
-    with m11:
-        st.metric("Custom Annual Revenue ($M)", f"{cust_rev['total_revenue']:,.1f}")
-    with m12:
-        st.metric("Custom Rev/OpEx Ratio", f"{cust_rev['rev_to_opex']:.1f}x")
+_metric_labels = {"Vera Rubin NVL72": "VR", "GB200 NVL72": "GB200", "Customized Rack": "Custom"}
+for rname in rack_names:
+    lbl = _metric_labels[rname]
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    with mc1:
+        st.metric(f"{lbl} E2E Latency (s)", f"{tl_results[rname]['e2e']:.6f}")
+    with mc2:
+        st.metric(f"{lbl} Output tok/s", f"{tl_results[rname]['tok_per_sec']:,.1f}")
+    with mc3:
+        st.metric(f"{lbl} Annual Revenue ($M)", f"{rev_results[rname]['total_revenue']:,.1f}")
+    with mc4:
+        st.metric(f"{lbl} Rev/OpEx Ratio", f"{rev_results[rname]['rev_to_opex']:.1f}x")
 
 # ─── ANIMATED FLOWCHART ──────────────────────────────────────────────────────
 st.header("Token Generation Pipeline — Animated Flowchart")
@@ -770,7 +618,7 @@ def _fmt_time(t):
 # Build per-step data for the selected rack
 # Step 2 sub-components
 embed_hbm_bytes = bytes_per_param * (vocab_size * d_model + input_tokens * d_model)  # embedding table + broadcast
-embed_nvl_bytes = bytes_per_param * 2 * input_tokens * d_model * 2 * (71/72)
+embed_nvl_bytes = bytes_per_param * 2 * input_tokens * d_model * 2 * ((n_gpu - 1) / n_gpu)
 embed_hbm_time_val = bytes_per_param * vocab_size * d_model / (mem_bw * 1e12) if mem_bw > 0 else 0
 embed_nvl_time_val = embed_nvl_bytes / (nvlink_bw * 1e12) if nvlink_bw > 0 else 0
 
@@ -788,12 +636,7 @@ dc_all_hbm_bytes_total = dc_all_hbm_bytes_per_tok * eff_decode_steps
 dc_all_nvl_bytes_total = nvl_bw_all_tokens_opt * per_gpu_nvlink_bw * 1e12  # back-derive bytes from BW component only
 
 # Use selected rack timeline
-if rack_type == "Customized Rack":
-    sel_tl = cust_tl
-elif rack_type == "Vera Rubin NVL72":
-    sel_tl = vr_tl
-else:
-    sel_tl = gb_tl
+sel_tl = tl_results[rack_type]
 
 flowchart_steps = [
     {
@@ -1277,47 +1120,39 @@ _active_opts = [
 _opt_label = ", ".join(_active_opts) if _active_opts else "No Optimizations"
 st.header(f"Latency Timeline ({_opt_label})")
 
-def make_tl_row(step_lbl, vr_val, gb_val, cust_val=None):
-    row = {"Step": step_lbl, "VR Duration (s)": vr_val, "GB200 Duration (s)": gb_val}
-    if rack_type == "Customized Rack":
-        row["Custom Duration (s)"] = cust_val
+_col_labels = {"Vera Rubin NVL72": "VR Duration (s)", "GB200 NVL72": "GB200 Duration (s)", "Customized Rack": "Custom Duration (s)"}
+
+def make_tl_row(step_lbl, key_or_vals):
+    row = {"Step": step_lbl}
+    for rname in rack_names:
+        if callable(key_or_vals):
+            row[_col_labels[rname]] = key_or_vals(tl_results[rname])
+        else:
+            row[_col_labels[rname]] = key_or_vals[rname]
     return row
 
 tl_data = []
 for i, name in enumerate(vr_tl["step_names"]):
-    c_val = cust_tl["steps"][i] if rack_type == "Customized Rack" else None
-    tl_data.append(make_tl_row(f"{i+1}. {name}", vr_tl["steps"][i], gb_tl["steps"][i], c_val))
+    tl_data.append(make_tl_row(f"{i+1}. {name}", {rn: tl_results[rn]["steps"][i] for rn in rack_names}))
     if i == 2:
-        c1 = cust_tl["n3_compute"] if rack_type == "Customized Rack" else None
-        tl_data.append(make_tl_row("   ↳ Compute", vr_tl["n3_compute"], gb_tl["n3_compute"], c1))
-        c2 = cust_tl["n3_hbm"] if rack_type == "Customized Rack" else None
-        tl_data.append(make_tl_row("   ↳ HBM", vr_tl["n3_hbm"], gb_tl["n3_hbm"], c2))
-        c3 = cust_tl["n3_nvlink"] if rack_type == "Customized Rack" else None
-        tl_data.append(make_tl_row("   ↳ NVLink", vr_tl["n3_nvlink"], gb_tl["n3_nvlink"], c3))
+        tl_data.append(make_tl_row("   ↳ Compute", {rn: tl_results[rn]["n3_compute"] for rn in rack_names}))
+        tl_data.append(make_tl_row("   ↳ HBM", {rn: tl_results[rn]["n3_hbm"] for rn in rack_names}))
+        tl_data.append(make_tl_row("   ↳ NVLink", {rn: tl_results[rn]["n3_nvlink"] for rn in rack_names}))
     elif i == 3:
-        c1 = cust_tl["n4_hbm"] if rack_type == "Customized Rack" else None
-        tl_data.append(make_tl_row("   ↳ HBM", vr_tl["n4_hbm"], gb_tl["n4_hbm"], c1))
+        tl_data.append(make_tl_row("   ↳ HBM", {rn: tl_results[rn]["n4_hbm"] for rn in rack_names}))
     elif i == 4:
-        c1 = cust_tl["n5_hbm"] if rack_type == "Customized Rack" else None
-        tl_data.append(make_tl_row("   ↳ HBM", vr_tl["n5_hbm"], gb_tl["n5_hbm"], c1))
-        c2 = cust_tl["n5_nvlink"] if rack_type == "Customized Rack" else None
-        tl_data.append(make_tl_row("   ↳ NVLink", vr_tl["n5_nvlink"], gb_tl["n5_nvlink"], c2))
+        tl_data.append(make_tl_row("   ↳ HBM", {rn: tl_results[rn]["n5_hbm"] for rn in rack_names}))
+        tl_data.append(make_tl_row("   ↳ NVLink", {rn: tl_results[rn]["n5_nvlink"] for rn in rack_names}))
 
-c_e2e = cust_tl["e2e"] if rack_type == "Customized Rack" else None
-tl_data.append(make_tl_row("E2E", vr_tl["e2e"], gb_tl["e2e"], c_e2e))
-
-c_avg = cust_tl["avg_time_per_tok"] if rack_type == "Customized Rack" else None
-tl_data.append(make_tl_row("Avg Time/Output Token (s)", vr_tl["avg_time_per_tok"], gb_tl["avg_time_per_tok"], c_avg))
-
-c_tps = cust_tl["tok_per_sec"] if rack_type == "Customized Rack" else None
-tl_data.append(make_tl_row("Output tok/s", vr_tl["tok_per_sec"], gb_tl["tok_per_sec"], c_tps))
+tl_data.append(make_tl_row("E2E", {rn: tl_results[rn]["e2e"] for rn in rack_names}))
+tl_data.append(make_tl_row("Avg Time/Output Token (s)", {rn: tl_results[rn]["avg_time_per_tok"] for rn in rack_names}))
+tl_data.append(make_tl_row("Output tok/s", {rn: tl_results[rn]["tok_per_sec"] for rn in rack_names}))
 
 st.dataframe(pd.DataFrame(tl_data), use_container_width=True, hide_index=True)
 
 # ─── Revenue Model ───────────────────────────────────────────────────────────
 with st.expander("💸 Revenue Model", expanded=False):
-    active_racks = ["Vera Rubin", "GB200", "Custom"] if rack_type == "Customized Rack" else ["Vera Rubin", "GB200"]
-    rev_cols = st.columns(len(active_racks))
+    rev_cols = st.columns(len(rack_names))
 
     def show_revenue(col, title, rev, dc, tl_data_dict):
         with col:
@@ -1346,21 +1181,16 @@ with st.expander("💸 Revenue Model", expanded=False):
             st.write(f"Revenue/OpEx: {rev['rev_to_opex']:.1f}x")
             st.write(f"Cost/Mtok: ${rev['cost_per_mtok']:.2f}")
 
-    show_revenue(rev_cols[0], "Vera Rubin NVL72", vr_rev, vr_dc, vr_tl)
-    show_revenue(rev_cols[1], "GB200 NVL72", gb_rev, gb_dc, gb_tl)
-    if rack_type == "Customized Rack":
-        show_revenue(rev_cols[2], "Customized Rack", cust_rev, cust_dc, cust_tl)
+    for i, rname in enumerate(rack_names):
+        show_revenue(rev_cols[i], rname, rev_results[rname], dc_results[rname], tl_results[rname])
 
 # ─── DC Cost Model ───────────────────────────────────────────────────────────
 with st.expander("🏗️ DC Cost Model", expanded=False):
-    active_dcs = [(0, "Vera Rubin NVL72", vr_dc), (1, "GB200 NVL72", gb_dc)]
-    if rack_type == "Customized Rack":
-        active_dcs.append((2, "Customized Rack", cust_dc))
-    
-    dc_cols = st.columns(len(active_dcs))
-    for idx, title, dc in active_dcs:
+    dc_cols = st.columns(len(rack_names))
+    for idx, rname in enumerate(rack_names):
+        dc = dc_results[rname]
         with dc_cols[idx]:
-            st.subheader(title)
+            st.subheader(rname)
             st.write(f"IT Power: {dc['it_power_mw']:,.0f} MW | Facility: {dc['facility_power_mw']:,.0f} MW")
             st.write(f"Racks: {dc['n_racks']:,} | GPUs: {dc['total_gpus']:,}")
             st.write(f"**Total CapEx: ${dc['total_capex']:,.0f}M**")
